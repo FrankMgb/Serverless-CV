@@ -7,6 +7,9 @@ document.addEventListener('DOMContentLoaded', function() {
     initSearch();
     initInteractiveElements();
     enhanceAccessibility();
+    initVisitorCounter();
+    initProjects();
+    initSectionSwitcher();
 });
 
 /**
@@ -61,6 +64,192 @@ function initMobileMenu() {
 }
 
 /**
+ * Visitor Counter
+ */
+function initVisitorCounter() {
+    const countEl = document.getElementById('visitor-count');
+    if (!countEl) return;
+
+    // Allow configuration via global window.CONFIG.API_URL injected in index.html
+    const apiUrl = (window.CONFIG && window.CONFIG.API_URL) || null;
+    if (!apiUrl) {
+        // No API configured yet; keep placeholder and exit gracefully
+        countEl.textContent = '—';
+        countEl.title = 'Visitor counter inactive (no API URL configured)';
+        return;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
+    fetch(apiUrl, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        mode: 'cors',
+        signal: controller.signal
+    }).then(async (res) => {
+        clearTimeout(timeout);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        // Support both {count: number} and plain number responses
+        const data = await res.json().catch(() => null);
+        let value = null;
+        if (data === null) {
+            // Attempt text fallback
+            const text = await res.text().catch(() => '');
+            const num = Number(text);
+            if (!Number.isNaN(num)) value = num;
+        } else if (typeof data === 'number') {
+            value = data;
+        } else if (data && typeof data.count !== 'undefined') {
+            value = Number(data.count);
+        }
+        if (value === null || Number.isNaN(value)) throw new Error('Invalid response');
+        countEl.textContent = value.toLocaleString();
+        countEl.setAttribute('data-loaded', 'true');
+    }).catch((err) => {
+        clearTimeout(timeout);
+        // Fail quietly: leave placeholder and add tooltip for debugging
+        countEl.textContent = '—';
+        countEl.title = `Visitor counter unavailable (${err && err.message ? err.message : 'error'})`;
+    });
+}
+
+/**
+ * Projects list population
+ */
+function initProjects() {
+    // Support multiple projects hubs (e.g., in About and in #projects-section)
+    const sections = Array.from(document.querySelectorAll('.projects-section'));
+    if (!sections.length) return;
+
+    sections.forEach((section) => {
+        const list = section.querySelector('.project-list');
+        if (!list) return;
+
+    const cfg = (window.CONFIG && Array.isArray(window.CONFIG.projects)) ? window.CONFIG.projects : null;
+    const staticItems = Array.from(list.querySelectorAll('li a.project-link')).map(a => ({
+        title: a.querySelector('.project-title')?.textContent?.trim() || a.textContent.trim(),
+        href: a.getAttribute('href') || '#',
+        date: a.querySelector('.project-date')?.textContent?.trim() || '',
+        tags: (a.querySelector('.project-tags')?.textContent || '').split(/\s+/).filter(Boolean)
+    }));
+
+    const source = (cfg && cfg.length) ? cfg : staticItems;
+
+    // Build category pills from tags (fallback to a single "All")
+    const allTags = new Set();
+    source.forEach(p => {
+        const tags = Array.isArray(p.tags) ? p.tags : String(p.tags || '').split(/\s+/);
+        tags.filter(Boolean).forEach(t => allTags.add(t.replace(/^#/, '')));
+    });
+    const categories = ['All', ...Array.from(allTags).slice(0, 12)];
+
+    // Inject category bar if not present
+    let catBar = section.querySelector('.project-categories');
+    if (!catBar) {
+        catBar = document.createElement('div');
+        catBar.className = 'project-categories';
+        // If list is not a direct child of section, insert before list within its parent to avoid NotFoundError
+        const parent = list.parentNode;
+        if (parent === section) {
+            section.insertBefore(catBar, list);
+        } else if (parent && parent.insertBefore) {
+            parent.insertBefore(catBar, list);
+        } else {
+            section.prepend(catBar);
+        }
+    }
+    catBar.innerHTML = categories.map((c, i) => `<button class="project-cat${i===0?' active':''}" data-cat="${c}">${c}</button>`).join('');
+
+    // Detail container
+    // Create a detail container scoped to this section to avoid ID clashes
+    let detail = section.querySelector('.project-detail-inline');
+    if (!detail) {
+        detail = document.createElement('div');
+        detail.className = 'project-detail-container project-detail-inline hidden';
+        section.appendChild(detail);
+    }
+
+    // Render list by category
+    const escape = (s) => String(s==null?'':s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
+    function renderList(activeCat='All') {
+        const items = source.filter(p => {
+            if (activeCat === 'All') return true;
+            const tags = Array.isArray(p.tags) ? p.tags : String(p.tags||'').split(/\s+/);
+            return tags.some(t => t.replace(/^#/, '') === activeCat);
+        });
+        list.innerHTML = items.map(p => {
+            const tags = Array.isArray(p.tags) ? p.tags.join(' ') : (p.tags||'');
+            const ext = String(p.href||p.url||'#');
+            const target = (/^https?:\/\//.test(ext)) ? ' target="_blank" rel="noopener noreferrer"' : '';
+            return `<li>
+              <a href="${escape(ext)}" class="project-link" data-title="${escape(p.title)}" data-href="${escape(ext)}" data-tags="${escape(tags)}" data-date="${escape(p.date||'')}">
+                <span class="project-title">${escape(p.title)}</span>
+                <span class="project-date">${escape(p.date||'')}</span>
+                <span class="project-tags">${escape(tags)}</span>
+              </a>
+            </li>`;
+        }).join('');
+        attachItemHandlers();
+    }
+
+    function attachItemHandlers() {
+        list.querySelectorAll('a.project-link').forEach(a => {
+            a.addEventListener('click', function(e){
+                const href = this.getAttribute('href') || '#';
+                if (href.startsWith('#')) {
+                    // In-page anchor: reveal existing section
+                    const target = document.querySelector(href);
+                    if (target) {
+                        e.preventDefault();
+                        // Show inline detail wrapper pointing to existing content
+                        detail.classList.remove('hidden');
+                        detail.innerHTML = '';
+                        detail.appendChild(target.cloneNode(true));
+                        detail.scrollIntoView({behavior:'smooth', block:'start'});
+                    }
+                    return;
+                }
+                // For our inline details, intercept internal relative links
+                if (!/^https?:\/\//.test(href)) {
+                    e.preventDefault();
+                    const title = this.dataset.title || 'Project';
+                    const date = this.dataset.date || '';
+                    const tags = this.dataset.tags || '';
+                    detail.classList.remove('hidden');
+                    detail.innerHTML = `
+                        <h1>${escape(title)}</h1>
+                        ${date?`<p style="color: var(--color-text-secondary); margin-bottom: 8px;">${escape(date)}</p>`:''}
+                        ${tags?`<p class="project-tags">${escape(tags)}</p>`:''}
+                        <p>Details coming soon. If this project has its own page, it would open at: <code>${escape(href)}</code>.</p>
+                    `;
+                    detail.scrollIntoView({behavior:'smooth', block:'start'});
+                }
+            });
+        });
+    }
+
+    // Category switching
+    catBar.querySelectorAll('.project-cat').forEach(btn => {
+        btn.addEventListener('click', function(){
+            catBar.querySelectorAll('.project-cat').forEach(b=>b.classList.remove('active'));
+            this.classList.add('active');
+            const cat = this.getAttribute('data-cat');
+            renderList(cat);
+            // hide detail on category change
+            detail.classList.add('hidden');
+            detail.innerHTML = '';
+        });
+    });
+
+    // Initial render
+    renderList('All');
+    }); // end sections.forEach
+}
+
+/**
  * Navigation Functionality
  */
 function initNavigation() {
@@ -106,14 +295,8 @@ function initNavigation() {
 function handleSectionNavigation(href) {
     // Update content based on navigation
     switch (href) {
-        case '#home':
-            updateMainContent('Home', getHomeContent());
-            break;
         case '#about':
             updateMainContent('About', getAboutContent());
-            break;
-        case '#skills':
-            updateMainContent('Skills', getSkillsContent());
             break;
         case '#experience':
             updateMainContent('Experience', getExperienceContent());
@@ -160,21 +343,6 @@ function updateMainContent(title, content) {
 /**
  * Content for different sections
  */
-function getHomeContent() {
-    return `
-        <p>Welcome to my portfolio! I'm Nicole Xiomora An, a DevOps & AWS Cloud Engineer based in New Jersey, USA.</p>
-        <p>This portfolio showcases my journey in cloud computing, DevOps practices, and software engineering. Browse through different sections to learn more about my skills, experience, and projects.</p>
-        <p>Feel free to explore and don't hesitate to reach out for any opportunities or inquiries!</p>
-        
-        <div style="margin-top: 2rem; padding: 1rem; background: rgba(50, 184, 198, 0.1); border-radius: 8px; border-left: 4px solid var(--color-teal-300);">
-            <h3 style="margin-top: 0; color: var(--color-teal-300);">Quick Links</h3>
-            <p>• <a href="#about" class="content-link">Learn more about my journey</a></p>
-            <p>• <a href="#skills" class="content-link">View my technical skills</a></p>
-            <p>• <a href="#experience" class="content-link">See my work experience</a></p>
-            <p>• <a href="#archive" class="content-link">Browse my projects</a></p>
-        </div>
-    `;
-}
 
 function getAboutContent() {
     return `
@@ -378,68 +546,62 @@ function initInteractiveElements() {
         
         item.addEventListener('click', function(event) {
             event.preventDefault();
-            const categoryName = this.querySelector('.category-name').textContent;
-            const categoryCount = this.querySelector('.category-count').textContent;
-            
+            const categoryName = this.querySelector('.category-name')?.textContent?.trim() || '';
+            // If user clicks Projects category, jump to Projects hub and show the list with filters
+            if (/^project/i.test(categoryName)) {
+                const projectsSection = document.querySelector('.projects-section');
+                if (projectsSection) {
+                    projectsSection.scrollIntoView({behavior:'smooth', block:'start'});
+                    // If a category bar exists, default to All
+                    const firstPill = projectsSection.querySelector('.project-categories .project-cat');
+                    if (firstPill) firstPill.click();
+                }
+                return;
+            }
+            // Default fallback copy (non-project categories)
+            const categoryCount = this.querySelector('.category-count')?.textContent || '0';
             const categoryContent = `
                 <p>Viewing content filtered by <strong>${categoryName}</strong> category (${categoryCount} item${categoryCount !== '1' ? 's' : ''}).</p>
-                
                 <div style="padding: 1.5rem; background: rgba(50, 184, 198, 0.1); border-radius: 8px; margin: 1.5rem 0;">
                     <h3 style="color: var(--color-teal-300); margin-top: 0;">${categoryName} Content</h3>
                     <p>This section would display all content tagged with the "${categoryName}" category.</p>
-                    ${categoryName === 'Projects' ? `
-                        <ul>
-                            <li>AWS Cloud Resume Challenge Implementation</li>
-                            <li>DevOps Pipeline Automation</li>
-                            <li>Infrastructure as Code Templates</li>
-                            <li>Monitoring and Alerting Systems</li>
-                        </ul>
-                    ` : categoryName === 'Discussions' ? `
-                        <p>Recent discussion: "Best practices for cloud migration strategies"</p>
-                    ` : `
-                        <p>Professional tips and insights from my experience in DevOps and cloud engineering.</p>
-                    `}
-                </div>
-                
-                <p><a href="#about" class="content-link">← Back to main content</a></p>
-            `;
-            
+                </div>`;
             updateMainContent(`${categoryName}`, categoryContent);
         });
     });
     
-    // Add functionality for tags
-    const tags = document.querySelectorAll('.tag');
-    tags.forEach(tag => {
-        tag.setAttribute('tabindex', '0');
-        tag.setAttribute('role', 'button');
-        tag.style.cursor = 'pointer';
-        
-        tag.addEventListener('keydown', function(event) {
-            if (event.key === 'Enter' || event.key === ' ') {
-                event.preventDefault();
-                this.click();
-            }
+    // Add functionality for skills tabs in sidebar
+    const skillsTabs = document.querySelectorAll('.skills-tab');
+    const skillsPanels = document.querySelectorAll('.skills-panel');
+    if (skillsTabs.length && skillsPanels.length) {
+        skillsTabs.forEach(tab => {
+            tab.setAttribute('tabindex', '0');
+            tab.addEventListener('keydown', function(event) {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    this.click();
+                }
+            });
+            tab.addEventListener('click', function() {
+                // Update active tab
+                skillsTabs.forEach(t => {
+                    t.classList.remove('active');
+                    t.setAttribute('aria-selected', 'false');
+                });
+                this.classList.add('active');
+                this.setAttribute('aria-selected', 'true');
+                // Show corresponding panel
+                const targetId = this.getAttribute('aria-controls');
+                skillsPanels.forEach(panel => {
+                    if (panel.id === targetId) {
+                        panel.classList.remove('hidden');
+                    } else {
+                        panel.classList.add('hidden');
+                    }
+                });
+            });
         });
-        
-        tag.addEventListener('click', function(event) {
-            event.preventDefault();
-            const tagName = this.textContent;
-            
-            const tagContent = `
-                <p>Viewing content tagged with <strong>"${tagName}"</strong>.</p>
-                
-                <div style="padding: 1.5rem; background: rgba(50, 184, 198, 0.1); border-radius: 8px; margin: 1.5rem 0;">
-                    <h3 style="color: var(--color-teal-300); margin-top: 0;">${tagName} Related Content</h3>
-                    ${getTagSpecificContent(tagName)}
-                </div>
-                
-                <p><a href="#about" class="content-link">← Back to main content</a></p>
-            `;
-            
-            updateMainContent(`Tag: ${tagName}`, tagContent);
-        });
-    });
+    }
     
     // Enhance social links
     const socialLinks = document.querySelectorAll('.social-link');
@@ -476,6 +638,82 @@ function getTagSpecificContent(tagName) {
     };
     
     return tagContentMap[tagName] || '<p>Content related to this topic will be added soon.</p>';
+}
+
+/**
+ * Simple About/Projects tabs switcher
+ */
+function initSectionSwitcher() {
+    const contentBody = document.querySelector('.content-body');
+    if (!contentBody) return;
+
+    let aboutPane = document.getElementById('about-section');
+    let projectsPane = document.getElementById('projects-section');
+
+    if (!aboutPane || !projectsPane) {
+        const all = Array.from(contentBody.childNodes);
+        const projIndex = all.findIndex(n => n.nodeType === 1 && n.classList && n.classList.contains('projects-section'));
+        if (projIndex !== -1) {
+            if (!aboutPane) {
+                aboutPane = document.createElement('section');
+                aboutPane.id = 'about-section';
+                aboutPane.className = 'section-pane';
+                for (let i = 0; i < projIndex; i++) {
+                    if (all[i]) aboutPane.appendChild(all[i].cloneNode(true));
+                }
+            }
+            if (!projectsPane) {
+                projectsPane = document.createElement('section');
+                projectsPane.id = 'projects-section';
+                projectsPane.className = 'section-pane';
+                for (let i = projIndex; i < all.length; i++) {
+                    if (all[i]) projectsPane.appendChild(all[i].cloneNode(true));
+                }
+            }
+            contentBody.innerHTML = '';
+            contentBody.appendChild(aboutPane);
+            contentBody.appendChild(projectsPane);
+        } else {
+            return;
+        }
+    } else {
+        aboutPane.classList.add('section-pane');
+        projectsPane.classList.add('section-pane');
+    }
+
+    aboutPane.hidden = false;
+    projectsPane.hidden = true;
+    aboutPane.style.opacity = '1';
+    projectsPane.style.opacity = '0';
+
+    const tabs = document.querySelectorAll('.top-tab');
+    if (tabs.length) {
+        tabs.forEach(tab => {
+            tab.addEventListener('click', (e) => {
+                e.preventDefault();
+                const targetSel = tab.getAttribute('data-target');
+                const toShow = targetSel ? document.querySelector(targetSel) : null;
+                if (!toShow) return;
+                const toHide = (toShow === aboutPane) ? projectsPane : aboutPane;
+
+                tabs.forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
+                tab.classList.add('active');
+                tab.setAttribute('aria-selected', 'true');
+
+                toHide.style.opacity = '0';
+                setTimeout(() => {
+                    toHide.hidden = true;
+                    toShow.hidden = false;
+                    requestAnimationFrame(() => { toShow.style.opacity = '1'; });
+                }, 150);
+
+                if (toShow === projectsPane) {
+                    const projSection = toShow.querySelector('.projects-section');
+                    if (projSection) projSection.scrollIntoView({behavior:'smooth', block:'start'});
+                }
+            });
+        });
+    }
 }
 
 /**
